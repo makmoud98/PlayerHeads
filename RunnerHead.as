@@ -8,7 +8,15 @@
 const s32 NUM_HEADFRAMES = 4;
 const s32 NUM_UNIQUEHEADS = 30;
 const int FRAMES_WIDTH = 8 * NUM_HEADFRAMES;
-bool loaded_head = false;
+
+//PlayerHeads mod
+const string HEAD_PROP = "my head :)";
+const string PROP_NAME_PREFIX = "head: ";
+const string HEAD_PATH = "../Cache/head.png";
+const string SUCCESS_WARN = "Your head was successfully loaded.";
+const string NOT_FOUND_WARN = "No head was found in " + HEAD_PATH + ". To get a custom head, you must put it in this directory. For more help, visit the forums.";
+const string WRONG_SIZE_WARN = "Your head must be 64 x 16. Please check your head in " + HEAD_PATH;
+
 
 
 void onInit(CBlob@ this)
@@ -19,31 +27,32 @@ void onInit(CBlob@ this)
 void onCommand(CBlob@ this, u8 cmd, CBitStream@ params){
 	if(getNet().isClient() && cmd == this.getCommandID("send_head")){
 		CPlayer@ localPlayer = getLocalPlayer();
-		string target = params.read_string();	
+		string target_username = params.read_string();//this is the name of the player's head we are truing to recieve
 		if(localPlayer is null){
 			return;
 		}
-		else if(localPlayer.getUsername() != target){//read in image data from bitstream
-			string path = "Maps/Heads/"+target+".png";
-			if(!checkHead(path)){
-				CFileImage img(64,16, true);
-				img.setFilename(path, ImageFileBase(3));//changing 3 to 1 will make it store stuff in ../Cache but there is no way to load a texture from there
-				for(u8 x = 0; x < 64; x++){					//the reason it is stored in maps right now is because 
-					for(u8 y = 0; y < 16; y++){				//textures wont load with AddSpriteLayer without the textures first being there upon launching the game
-						img.setPixelPosition(Vec2f(x,y));	//since Maps directory is the only one where images wont get deleted on restart, it is currently the only one that works
-															//the issue with this is that there is no way to get someone's new head without manually deleting their old one first
-															//i am hoping someone else will find a solution to this issue.
-						if(x >= 48){//this is because the 4th frame is not used.
-							img.setPixel(0,0,0,0);
-						}
-						else{
-							img.setPixel(params.read_u8(),params.read_u8(),params.read_u8(),params.read_u8());//A, R, G, B
-						}
+		else if(localPlayer.getUsername() != target_username){//if the head is not mine (we dont need to recieve the data of our own head), then..
+			const string PROP_NAME = PROP_NAME_PREFIX + target_username;//added the prefix so a player cant deliberately fuck up other game textures. ex: "rope"
+			ImageData new_head(64,16);//create empty imagedata object to insert data from bitstream
+			for(u8 x = 0; x < 64; x++){					
+				for(u8 y = 0; y < 16; y++){			
+					if(x >= 48){
+						new_head.put(x,y, SColor(0x000000));//3rd frame not used, so all of its pixels are transparent and colorless
+					}
+					else{
+						SColor pixel(params.read_u8(),params.read_u8(),params.read_u8(),params.read_u8());//A, R, G, B
+						new_head.put(x, y, pixel);//insert the pixel into the imagedata
 					}
 				}
-				img.Save();
-				LoadHead(this.getSprite());
 			}
+			if(Texture::exists(PROP_NAME)){//if we have already loaded this head (could happen upon a player reconnecting while the client has not), then..
+				Texture::update(PROP_NAME, new_head);//update the current texture to the new one
+			}
+			else{
+				Texture::createFromData(PROP_NAME, new_head);//create the texture from our new data
+			}
+			CBlob@ local_blob = localPlayer.getBlob();
+			if(local_blob !is null) LoadHead(local_blob.getSprite());
 		}
 	}
 }
@@ -158,32 +167,37 @@ CSpriteLayer@ LoadHead(CSprite@ this)
 		this.RemoveSpriteLayer("head");
 
 		bool custom = false;
-		string path;
+		string prop_name;
 		CPlayer@ player = blob.getPlayer();
 		CPlayer@ localPlayer = getLocalPlayer();
 		if(player !is null && localPlayer !is null){
 			string username = player.getUsername();
-			if(username == localPlayer.getUsername()){
-				path = "Maps/myhead.png";//client's head is stored here.
+			if(username == localPlayer.getUsername()){//if i am trying to load my own head, then..
+				prop_name = HEAD_PROP;
 			}
 			else{
-				path = "Maps/Heads/"+username+".png";
+				prop_name = PROP_NAME_PREFIX + username;				
 			}
-			custom = checkHead(path);
+			custom = Texture::exists(prop_name);//if the texture "exists" then it mean it has already been loaded properly
 		}
 		// add head
 		u16 headIndex = blob.getHeadNum();
 		HeadsDLC dlc = dlcs[get_dlc_number(headIndex)];
-		CSpriteLayer@ head = this.addSpriteLayer("head",
-							 custom ? path : dlc.filename, 16, 16,
-		                     (dlc.do_teamcolour || custom ? blob.getTeamNum() : 0),
-		                     (dlc.do_skincolour || custom ? blob.getSkinNum() : 0));
+		CSpriteLayer@ head;
+		if(custom){//if we are trying to load a custom head, then...
+			@head = this.addTexturedSpriteLayer("head", prop_name, 16, 16);//add a textured sprite layer with the texture we created earlier (either in check_head if it was your own or in the send_head command)
+		}
+		else{
+	    	@head = this.addSpriteLayer("head", dlc.filename, 16, 16,
+	                     (dlc.do_teamcolour ? blob.getTeamNum() : 0),
+	                     (dlc.do_skincolour ? blob.getSkinNum() : 0));		
+	    }
 
 		// set defaults
 		headIndex = headIndex % 256; // DLC heads
-		s32 headFrame = custom ? 0 : getHeadFrame(blob, headIndex);
-
+		s32 headFrame = custom ? 0 : getHeadFrame(blob, headIndex);//all the custom heads textures will only be 3 frames, so this must be 0
 		blob.set_s32("head index", headFrame);
+
 		if (head !is null)
 		{
 			Animation@ anim = head.addAnimation("default", 0, false);
@@ -200,12 +214,45 @@ CSpriteLayer@ LoadHead(CSprite@ this)
 }
 
 //this function checks if the file exists and is the right size..
-bool checkHead(string path){
-	CFileImage image(path);
-	if(image.width() == 64 && image.height() == 16){
-		return true;
+//if the texture "exists" then it mean it has already been loaded properly
+bool check_head(){
+	if(Texture::exists(HEAD_PROP)) return true; //did we already load the head?
+	else if(Texture::createFromFile(HEAD_PROP, HEAD_PATH)){//if the head is in the right directory...
+		ImageData@ head = Texture::data(HEAD_PROP);
+		print(" " + head.width() + " " + head.height());
+		if(head.width() == 64 && head.height() == 16){//and it is the right size....
+			warn(SUCCESS_WARN);
+			return true;//then success!
+		}
+		else{
+			warn(WRONG_SIZE_WARN);
+			Texture::destroy(HEAD_PROP);//destroy the texture since it was not the right size. 
+		}
+	}
+	else{
+		warn(NOT_FOUND_WARN);
 	}
 	return false;
+}
+
+void serialize_image(ImageData@ head, CBitStream@ stream){
+	for(u16 x = 0; x < 48; x++){//iterate only through the first 3 frames since the last frame is useless
+		for(u16 y = 0; y < 16; y++){
+			SColor pixel = head.get(x,y);//get the pixel at the current location
+			if(pixel.getAlpha() == 0){//any fully transparent pixels will have 0 for rgb to make compression easier for the server.
+				stream.write_u8(0);
+				stream.write_u8(0);
+				stream.write_u8(0);
+				stream.write_u8(0);
+			}
+			else{//these are written backwards so that it is in order when reading it
+				stream.write_u8(pixel.getBlue());
+				stream.write_u8(pixel.getGreen());
+				stream.write_u8(pixel.getRed());
+				stream.write_u8(pixel.getAlpha());
+			}
+		}
+	}
 }
 
 void onGib(CSprite@ this)
@@ -258,37 +305,15 @@ void onTick(CSprite@ this)
 	if (head is null && (player !is null || (blob.getBrain() !is null && blob.getBrain().isActive()) || blob.getTickSinceCreated() > 3))
 	{
 		CPlayer@ localPlayer = getLocalPlayer();
-		if(	getNet().isClient() && localPlayer !is null && player !is null && player.getUsername() == localPlayer.getUsername()){//here is where we attempt to load in the client's custom head and then send it to all the other clients.
-																				 												 //with this current implementation you should be able to modify your head and send it to other clients in between deaths 
-																																 //(which is kinda cool but annoying. but doesnt do that yet until there is a way to reload textures)
-																																 // i havent experimented with ReloadSprite function yet so that is a good place to start
-			if(checkHead("myhead.png")){
-				loaded_head = true;
-		 		CBitStream params;
-				params.write_string(player.getUsername());
-				for(u16 x = 0; x < 48; x++){//iterate only through the first 3 frames
-					for(u16 y = 0; y < 16; y++){
-						image.setPixelPosition(Vec2f(x,y));
-						SColor pixel = image.readPixel();
-						if(pixel.getAlpha() == 0){
-							params.write_u8(0);
-							params.write_u8(0);
-							params.write_u8(0);
-							params.write_u8(0);
-						}
-						else{
-							params.write_u8(pixel.getBlue());
-							params.write_u8(pixel.getGreen());
-							params.write_u8(pixel.getRed());
-							params.write_u8(pixel.getAlpha());
-						}
-					}
-				}
-		 		blob.SendCommand(blob.getCommandID("send_head"), params);
-		 		print("sent send_head cmd");
+		if(getNet().isClient() && localPlayer !is null && player !is null && player.getUsername() == localPlayer.getUsername() && !Texture::exists(localPlayer.getUsername())){//if this is on MY client and i have not yet loaded a custom head, then...
+			if(check_head()){//check if the head is there and the right size, then...
+	 			CBitStream params;
+				params.write_string(localPlayer.getUsername());//so the clients know who the head belongs to
+				serialize_image(Texture::data(HEAD_PROP), params);//read the imagedata and write it to the bitstream
+		 		blob.SendCommand(blob.getCommandID("send_head"), params);//this sends the bitstream to all the other clients
 		 	}
 		}
-		@head = LoadHead(this);
+		@head = LoadHead(this);//instantly load our fresh new custom head (this also loads the vanilla heads too)
 	}
 
 	if (head !is null)
@@ -343,3 +368,95 @@ void onTick(CSprite@ this)
 		}
 	}
 }
+
+
+//PlayerHeads mod
+const string HEAD_PROP = "my head :)";
+const string PROP_NAME_PREFIX = "head: ";
+const string HEAD_PATH = "../Cache/head.png";
+const string SUCCESS_WARN = "Your head was successfully loaded.";
+const string NOT_FOUND_WARN = "No head was found in " + HEAD_PATH + ". To get a custom head, you must put it in this directory. For more help, visit the forums.";
+const string WRONG_SIZE_WARN = "Your head must be 64 x 16. Please check your head in " + HEAD_PATH;
+
+		string target_username = params.read_string();//this is the name of the player's head we are truing to recieve
+		else if(localPlayer.getUsername() != target_username){//if the head is not mine (we dont need to recieve the data of our own head), then..
+			const string PROP_NAME = PROP_NAME_PREFIX + target_username;//added the prefix so a player cant deliberately fuck up other game textures. ex: "rope"
+			ImageData new_head(64,16);//create empty imagedata object to insert data from bitstream
+			for(u8 x = 0; x < 64; x++){					
+				for(u8 y = 0; y < 16; y++){			
+					if(x >= 48){
+						new_head.put(x,y, SColor(0x000000));//3rd frame not used, so all of its pixels are transparent and colorless
+					}
+					else{
+						SColor pixel(params.read_u8(),params.read_u8(),params.read_u8(),params.read_u8());//A, R, G, B
+						new_head.put(x, y, pixel);//insert the pixel into the imagedata
+					}
+				}
+			}
+			if(Texture::exists(PROP_NAME)){//if we have already loaded this head (could happen upon a player reconnecting while the client has not), then..
+				Texture::update(PROP_NAME, new_head);//update the current texture to the new one
+			else{
+				Texture::createFromData(PROP_NAME, new_head);//create the texture from our new data
+			}
+			CBlob@ local_blob = localPlayer.getBlob();
+			if(local_blob !is null) LoadHead(local_blob.getSprite());
+		string prop_name;
+			if(username == localPlayer.getUsername()){//if i am trying to load my own head, then..
+				prop_name = HEAD_PROP;
+				prop_name = PROP_NAME_PREFIX + username;				
+			custom = Texture::exists(prop_name);//if the texture "exists" then it mean it has already been loaded properly
+		CSpriteLayer@ head;
+		if(custom){//if we are trying to load a custom head, then...
+			@head = this.addTexturedSpriteLayer("head", prop_name, 16, 16);//add a textured sprite layer with the texture we created earlier (either in check_head if it was your own or in the send_head command)
+		}
+		else{
+	    	@head = this.addSpriteLayer("head", dlc.filename, 16, 16,
+	                     (dlc.do_teamcolour ? blob.getTeamNum() : 0),
+	                     (dlc.do_skincolour ? blob.getSkinNum() : 0));		
+	    }
+		s32 headFrame = custom ? 0 : getHeadFrame(blob, headIndex);//all the custom heads textures will only be 3 frames, so this must be 0
+
+//if the texture "exists" then it mean it has already been loaded properly
+bool check_head(){
+	if(Texture::exists(HEAD_PROP)) return true; //did we already load the head?
+	else if(Texture::createFromFile(HEAD_PROP, HEAD_PATH)){//if the head is in the right directory...
+		ImageData@ head = Texture::data(HEAD_PROP);
+		print(" " + head.width() + " " + head.height());
+		if(head.width() == 64 && head.height() == 16){//and it is the right size....
+			warn(SUCCESS_WARN);
+			return true;//then success!
+		}
+		else{
+			warn(WRONG_SIZE_WARN);
+			Texture::destroy(HEAD_PROP);//destroy the texture since it was not the right size. 
+		}
+	}
+	else{
+		warn(NOT_FOUND_WARN);
+void serialize_image(ImageData@ head, CBitStream@ stream){
+	for(u16 x = 0; x < 48; x++){//iterate only through the first 3 frames since the last frame is useless
+		for(u16 y = 0; y < 16; y++){
+			SColor pixel = head.get(x,y);//get the pixel at the current location
+			if(pixel.getAlpha() == 0){//any fully transparent pixels will have 0 for rgb to make compression easier for the server.
+				stream.write_u8(0);
+				stream.write_u8(0);
+				stream.write_u8(0);
+				stream.write_u8(0);
+			}
+			else{//these are written backwards so that it is in order when reading it
+				stream.write_u8(pixel.getBlue());
+				stream.write_u8(pixel.getGreen());
+				stream.write_u8(pixel.getRed());
+				stream.write_u8(pixel.getAlpha());
+			}
+		}
+	}
+}
+
+		if(getNet().isClient() && localPlayer !is null && player !is null && player.getUsername() == localPlayer.getUsername() && !Texture::exists(localPlayer.getUsername())){//if this is on MY client and i have not yet loaded a custom head, then...
+			if(check_head()){//check if the head is there and the right size, then...
+	 			CBitStream params;
+				params.write_string(localPlayer.getUsername());//so the clients know who the head belongs to
+				serialize_image(Texture::data(HEAD_PROP), params);//read the imagedata and write it to the bitstream
+		 		blob.SendCommand(blob.getCommandID("send_head"), params);//this sends the bitstream to all the other clients
+		@head = LoadHead(this);//instantly load our fresh new custom head (this also loads the vanilla heads too)
